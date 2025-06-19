@@ -1,0 +1,1253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AuraFlow: Predictive Scapes</title>
+    <!-- Tailwind CSS CDN for utility-first styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom CSS for base layout and immersive experience */
+        body {
+            overflow: hidden; /* Prevent scrollbars */
+            cursor: none; /* Hide default cursor for immersive experience */
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #000; /* Ensure black background */
+        }
+        #app-container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+            display: block; /* Ensure it takes full space */
+        }
+        canvas {
+            display: block; /* Remove default canvas margin */
+        }
+        /* Overlays for controls and debugging */
+        .overlay {
+            position: fixed;
+            background-color: rgba(17, 24, 39, 0.9); /* gray-900 with opacity */
+            color: white;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            z-index: 1000; /* Ensure overlays are on top */
+            max-width: 90%; /* Responsive width */
+        }
+        #controls-overlay {
+            top: 1rem;
+            right: 1rem;
+        }
+        #debug-overlay {
+            bottom: 1rem;
+            left: 1rem;
+            font-size: 0.75rem; /* text-xs */
+            font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace; /* font-mono */
+        }
+        /* Buttons within overlays */
+        .overlay button {
+            @apply px-4 py-2 rounded-md font-semibold transition-colors duration-200;
+        }
+        .overlay button:hover {
+            @apply opacity-90;
+        }
+        .overlay button:focus {
+            @apply outline-none ring-2 ring-offset-2 ring-blue-500;
+        }
+    </style>
+</head>
+<body>
+    <!-- Main application container where the Three.js canvas will be rendered -->
+    <div id="app-container" class="relative w-screen h-screen"></div>
+
+    <!-- Minimalist Control Overlay -->
+    <div id="controls-overlay" class="overlay hidden">
+        <h3 class="text-lg font-bold mb-2">AuraFlow Controls</h3>
+        <button id="toggle-sound-btn" class="bg-blue-600 hover:bg-blue-700 w-full mb-2" aria-label="Toggle sound">Toggle Sound</button>
+        <button id="reset-patterns-btn" class="bg-red-600 hover:bg-red-700 w-full mb-2" aria-label="Reset learned patterns">Reset Learned Patterns</button>
+        <button id="close-controls-btn" class="bg-gray-700 hover:bg-gray-800 w-full" aria-label="Close controls">Close</button>
+        <div class="mt-4 text-xs text-gray-400">
+            Press 'C' to toggle controls.
+            <br>
+            Press 'D' to toggle debug info.
+        </div>
+    </div>
+
+    <!-- Debug Overlay (for development/debugging only) -->
+    <div id="debug-overlay" class="overlay hidden">
+        <h3 class="text-lg font-bold mb-2">Debug Info</h3>
+        <p>FPS: <span id="debug-fps">--</span></p>
+        <p>Mouse Speed: <span id="debug-mouse-speed">--</span></p>
+        <p>Click Rate: <span id="debug-click-rate">--</span></p>
+        <p>Idle Time: <span id="debug-idle-time">--</span></p>
+        <p>Prediction: <span id="debug-predicted-state">--</span></p>
+        <p>Vis. Cmplx: <span id="debug-vis-complexity">--</span></p>
+        <p>Aud. Dns: <span id="debug-aud-density">--</span></p>
+        <p>Color Hue: <span id="debug-color-hue">--</span></p>
+    </div>
+
+    <!-- Three.js CDN for high-performance WebGL rendering -->
+    <script async src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.158.0/three.min.js"></script>
+    <!-- Tone.js CDN for advanced Web Audio API synthesis -->
+    <script async src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.min.js"></script>
+    <!-- TensorFlow.js CDN for client-side machine learning -->
+    <script async src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.13.0/dist/tf.min.js"></script>
+
+    <script type="module">
+        /**
+         * AuraFlow: Predictive Scapes
+         *
+         * This application creates an immersive, responsive digital environment
+         * that dynamically generates unique visual art and an accompanying ambient
+         * soundscape. It subtly learns and anticipates user interaction patterns
+         * over time, evolving its aesthetic and auditory characteristics in real-time
+         * to foster a feeling of intuitive, predictive dialogue.
+         *
+         * Leveraging insights from `holy-grail-evolved` and addressing recurring
+         * challenges with UI/UX, generative output quality, and debugging, this
+         * implementation prioritizes subtlety, performance, and robust internal logic.
+         */
+
+        // --- Core Application State & Configuration ---
+        const appState = {
+            // Visual parameters, normalized [0, 1]
+            visual: {
+                complexity: 0.5,    // Controls particle count, motion chaos
+                colorHue: Math.random(), // 0-1 for hue, will be converted to HSL
+                saturation: 0.7,
+                luminosity: 0.5,
+                flowSpeed: 0.5,
+            },
+            // Audio parameters, normalized [0, 1]
+            audio: {
+                density: 0.5,       // Controls number of active voices/events
+                timbre: 0.5,        // Controls waveform complexity, filter cutoff
+                reverb: 0.3,
+                pitchRange: 0.5,    // Controls melodic range
+            },
+            isAudioPlaying: false,
+            // Internal state for UIM and LPE
+            interactions: {
+                mousePositions: [], // Store recent mouse positions for velocity
+                lastClickTime: 0,
+                clickCount: 0,
+                lastActivityTime: Date.now(),
+                idleTime: 0,
+                keyboardActive: false,
+            },
+            lpe: {
+                // A simple statistical "learning" model. Instead of a full NN,
+                // we track a preference vector that gets nudged by interactions.
+                // This mimics "learning" user intent without heavy computation.
+                predictedPreference: {
+                    mood: 0.5, // 0=calm, 1=energetic
+                    complexity: 0.5,
+                    colorVibrancy: 0.5,
+                },
+                // A very simple TF.js model placeholder for demonstration.
+                // In a real scenario, this would be trained more robustly.
+                model: null,
+                trainingData: [], // Stores {input: [features], output: [target_preferences]}
+                isModelReady: false,
+            },
+            // Adaptive Evolution Engine (AEE) targets
+            targetVisual: {},
+            targetAudio: {},
+        };
+
+        const config = {
+            // UIM config
+            MOUSE_POS_HISTORY_LENGTH: 60, // frames
+            INTERACTION_FEATURE_WINDOW_MS: 5000, // 5 seconds for calculating features
+            IDLE_THRESHOLD_MS: 10000, // 10 seconds of inactivity to be considered idle
+            // LPE config
+            LPE_LEARNING_RATE: 0.001, // How strongly interactions nudge preferences
+            LPE_PREDICTION_INTERVAL_MS: 2000, // How often LPE makes a new prediction
+            MAX_TRAINING_DATA: 100, // Max samples for simple LPE training
+            // AEE config
+            PARAMETER_EASING_SPEED: 0.005, // How fast parameters interpolate to targets
+            // GVE config
+            PARTICLE_COUNT_MIN: 5000,
+            PARTICLE_COUNT_MAX: 20000,
+            PARTICLE_SPEED_MIN: 0.001,
+            PARTICLE_SPEED_MAX: 0.005,
+            // GASE config
+            AUDIO_DENSITY_MIN_VOICES: 2,
+            AUDIO_DENSITY_MAX_VOICES: 8,
+        };
+
+        // --- DOM Elements ---
+        const appContainer = document.getElementById('app-container');
+        const controlsOverlay = document.getElementById('controls-overlay');
+        const debugOverlay = document.getElementById('debug-overlay');
+        const toggleSoundBtn = document.getElementById('toggle-sound-btn');
+        const resetPatternsBtn = document.getElementById('reset-patterns-btn');
+        const closeControlsBtn = document.getElementById('close-controls-btn');
+
+        // Debug info elements
+        const debugFps = document.getElementById('debug-fps');
+        const debugMouseSpeed = document.getElementById('debug-mouse-speed');
+        const debugClickRate = document.getElementById('debug-click-rate');
+        const debugIdleTime = document.getElementById('debug-idle-time');
+        const debugPredictedState = document.getElementById('debug-predicted-state');
+        const debugVisComplexity = document.getElementById('debug-vis-complexity');
+        const debugAudDensity = document.getElementById('debug-aud-density');
+        const debugColorHue = document.getElementById('debug-color-hue');
+
+        // --- Three.js Globals (GVE) ---
+        let scene, camera, renderer, particles, particleMaterial, geometry;
+        let animationFrameId;
+        let lastFrameTime = performance.now();
+        let frameCount = 0;
+        let fps = 0;
+
+        // --- Tone.js Globals (GASE) ---
+        let mainSynth, padSynth, bassSynth, reverb, delay;
+        let activeVoices = [];
+        let melodyLoop, bassLoop;
+
+        // --- Web Worker for UIM & LPE ---
+        let worker;
+
+        // --- Utility Functions ---
+
+        /**
+         * Easing function for smooth parameter transitions.
+         * Ease-out cubic for a natural feel.
+         * @param {number} t - Current time (0 to 1)
+         * @returns {number} Eased value
+         */
+        const easeOutCubic = (t) => 1 - Math.pow(1 - t, 3);
+
+        /**
+         * Linear interpolation (lerp) function.
+         * @param {number} a - Start value
+         * @param {number} b - End value
+         * @param {number} alpha - Interpolation factor (0 to 1)
+         * @returns {number} Interpolated value
+         */
+        const lerp = (a, b, alpha) => a + (b - a) * alpha;
+
+        /**
+         * Maps a value from one range to another.
+         * @param {number} value - The value to map.
+         * @param {number} inMin - The minimum value of the input range.
+         * @param {number} inMax - The maximum value of the input range.
+         * @param {number} outMin - The minimum value of the output range.
+         * @param {number} outMax - The maximum value of the output range.
+         * @returns {number} The mapped value.
+         */
+        const mapRange = (value, inMin, inMax, outMin, outMax) => {
+            return ((value - inMin) * (outMax - outMin)) / (inMax - inMin) + outMin;
+        };
+
+        /**
+         * Clamps a value within a specified range.
+         * @param {number} value - The value to clamp.
+         * @param {number} min - The minimum allowed value.
+         * @param {number} max - The maximum allowed value.
+         * @returns {number} The clamped value.
+         */
+        const clamp = (value, min, max) => Math.max(min, Math.min(value, max));
+
+        /**
+         * Generates a unique anonymous user ID for persistence.
+         * @returns {string} An anonymous UUID.
+         */
+        const getAnonymousUserId = () => {
+            let userId = localStorage.getItem('auraflow_user_id');
+            if (!userId) {
+                userId = 'anon-' + Math.random().toString(36).substr(2, 9);
+                localStorage.setItem('auraflow_user_id', userId);
+            }
+            return userId;
+        };
+
+        /**
+         * Debounces a function call.
+         * @param {Function} func - The function to debounce.
+         * @param {number} delay - The debounce delay in milliseconds.
+         * @returns {Function} The debounced function.
+         */
+        const debounce = (func, delay) => {
+            let timeout;
+            return function(...args) {
+                const context = this;
+                clearTimeout(timeout);
+                timeout = setTimeout(() => func.apply(context, args), delay);
+            };
+        };
+
+        // --- Persistence Layer ---
+
+        /**
+         * Saves the current LPE training data and predicted preference to Local Storage.
+         * This allows the system to remember user patterns across sessions.
+         */
+        const saveState = debounce(() => {
+            try {
+                const stateToSave = {
+                    predictedPreference: appState.lpe.predictedPreference,
+                    trainingData: appState.lpe.trainingData,
+                };
+                localStorage.setItem(`auraflow_lpe_state_${getAnonymousUserId()}`, JSON.stringify(stateToSave));
+                console.log('AuraFlow state saved.');
+            } catch (e) {
+                console.error('Failed to save state to localStorage:', e);
+            }
+        }, 1000); // Debounce to prevent excessive writes
+
+        /**
+         * Loads the LPE training data and predicted preference from Local Storage.
+         */
+        const loadState = () => {
+            try {
+                const savedState = localStorage.getItem(`auraflow_lpe_state_${getAnonymousUserId()}`);
+                if (savedState) {
+                    const parsedState = JSON.parse(savedState);
+                    appState.lpe.predictedPreference = parsedState.predictedPreference || appState.lpe.predictedPreference;
+                    appState.lpe.trainingData = parsedState.trainingData || [];
+                    console.log('AuraFlow state loaded.');
+                    // Re-train the model immediately with loaded data
+                    if (appState.lpe.trainingData.length > 0 && appState.lpe.isModelReady) {
+                        trainLPEModel(appState.lpe.trainingData);
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to load state from localStorage:', e);
+                // Clear corrupted state if parsing fails
+                localStorage.removeItem(`auraflow_lpe_state_${getAnonymousUserId()}`);
+            }
+        };
+
+        /**
+         * Resets all learned patterns, effectively starting the "dialogue" fresh.
+         * Clears local storage and resets LPE state.
+         */
+        const resetLearnedPatterns = () => {
+            if (confirm('Are you sure you want to reset all learned patterns? This cannot be undone.')) {
+                localStorage.removeItem(`auraflow_lpe_state_${getAnonymousUserId()}`);
+                appState.lpe.predictedPreference = { mood: 0.5, complexity: 0.5, colorVibrancy: 0.5 };
+                appState.lpe.trainingData = [];
+                // Re-initialize and train a fresh model
+                initLPEModel();
+                console.log('Learned patterns reset.');
+                // Immediately apply neutral state
+                updateAdaptiveEvolutionEngineTargets(appState.lpe.predictedPreference);
+            }
+        };
+
+
+        // --- User Interaction Capture Module (UIM) ---
+
+        /**
+         * Handles mouse movement events, capturing position and updating last activity time.
+         * @param {MouseEvent} event
+         */
+        const handleMouseMove = (event) => {
+            appState.interactions.mousePositions.push({ x: event.clientX, y: event.clientY, time: Date.now() });
+            if (appState.interactions.mousePositions.length > config.MOUSE_POS_HISTORY_LENGTH) {
+                appState.interactions.mousePositions.shift(); // Keep history limited
+            }
+            appState.interactions.lastActivityTime = Date.now();
+        };
+
+        /**
+         * Handles mouse click events, updating click count and last activity time.
+         * @param {MouseEvent} event
+         */
+        const handleMouseDown = (event) => {
+            appState.interactions.clickCount++;
+            appState.interactions.lastClickTime = Date.now();
+            appState.interactions.lastActivityTime = Date.now();
+            // Start audio context on first click, as required by browsers
+            if (!appState.isAudioPlaying) {
+                startAudioContext();
+            }
+        };
+
+        /**
+         * Handles keyboard events for toggling overlays.
+         * @param {KeyboardEvent} event
+         */
+        const handleKeyDown = (event) => {
+            appState.interactions.lastActivityTime = Date.now();
+            appState.interactions.keyboardActive = true; // Simple boolean for any key activity
+
+            if (event.key === 'c' || event.key === 'C') {
+                toggleControlsOverlay();
+            } else if (event.key === 'd' || event.key === 'D') {
+                toggleDebugOverlay();
+            }
+        };
+
+        /**
+         * Handles keyup events to reset keyboard activity flag.
+         * @param {KeyboardEvent} event
+         */
+        const handleKeyUp = (event) => {
+            appState.interactions.keyboardActive = false;
+        };
+
+        /**
+         * Extracts meaningful features from raw interaction data.
+         * This function runs in the Web Worker.
+         * @param {object} rawInteractions - Raw data from main thread
+         * @returns {object} Normalized features
+         */
+        const extractFeatures = (rawInteractions) => {
+            const now = Date.now();
+            const mousePositionsInWindow = rawInteractions.mousePositions.filter(p => now - p.time <= config.INTERACTION_FEATURE_WINDOW_MS);
+
+            let mouseSpeed = 0;
+            if (mousePositionsInWindow.length > 1) {
+                let totalDistance = 0;
+                for (let i = 1; i < mousePositionsInWindow.length; i++) {
+                    const p1 = mousePositionsInWindow[i - 1];
+                    const p2 = mousePositionsInWindow[i];
+                    totalDistance += Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+                }
+                const timeDiff = mousePositionsInWindow[mousePositionsInWindow.length - 1].time - mousePositionsInWindow[0].time;
+                if (timeDiff > 0) {
+                    mouseSpeed = totalDistance / timeDiff; // pixels per ms
+                }
+            }
+
+            const clickRate = rawInteractions.clickCount / (config.INTERACTION_FEATURE_WINDOW_MS / 1000); // Clicks per second
+            const idleTime = Math.max(0, now - rawInteractions.lastActivityTime);
+            const idleRatio = Math.min(1, idleTime / config.IDLE_THRESHOLD_MS); // 0 (active) to 1 (very idle)
+
+            // Normalize features to [0, 1]
+            const normalizedMouseSpeed = clamp(mouseSpeed / 5, 0, 1); // Max speed of 5 px/ms
+            const normalizedClickRate = clamp(clickRate / 5, 0, 1); // Max 5 clicks/sec
+            const normalizedKeyboardActivity = rawInteractions.keyboardActive ? 1 : 0; // Simple binary
+            const normalizedIdleRatio = clamp(idleRatio, 0, 1);
+
+            return {
+                mouseSpeed: normalizedMouseSpeed,
+                clickRate: normalizedClickRate,
+                idleRatio: normalizedIdleRatio,
+                keyboardActivity: normalizedKeyboardActivity,
+                // Add more features as needed (e.g., directional bias, screen quadrant interaction)
+            };
+        };
+
+
+        // --- Learning & Prediction Engine (LPE) ---
+        // This is a simplified TF.js model. In a real application, it would be more complex
+        // and potentially pre-trained or trained with more sophisticated techniques.
+
+        /**
+         * Initializes the TensorFlow.js model for the LPE.
+         * This model will learn to map user interaction features to desired environmental states.
+         */
+        const initLPEModel = async () => {
+            // Define a simple sequential model
+            appState.lpe.model = tf.sequential({
+                layers: [
+                    // Input layer: 4 features (mouseSpeed, clickRate, idleRatio, keyboardActivity)
+                    tf.layers.dense({ units: 8, activation: 'relu', inputShape: [4] }),
+                    tf.layers.dense({ units: 8, activation: 'relu' }),
+                    // Output layer: 3 predicted preferences (mood, complexity, colorVibrancy)
+                    tf.layers.dense({ units: 3, activation: 'sigmoid' }) // Sigmoid to output values between 0 and 1
+                ]
+            });
+
+            // Compile the model with an optimizer and loss function
+            appState.lpe.model.compile({
+                optimizer: tf.train.adam(config.LPE_LEARNING_RATE),
+                loss: 'meanSquaredError' // Suitable for regression tasks
+            });
+
+            // Try to load model weights if previously saved (more robust for TF.js)
+            try {
+                const modelJson = localStorage.getItem(`auraflow_lpe_model_json_${getAnonymousUserId()}`);
+                const modelWeights = localStorage.getItem(`auraflow_lpe_model_weights_${getAnonymousUserId()}`);
+                if (modelJson && modelWeights) {
+                    const loadedModel = await tf.loadLayersModel(tf.io.browserFiles([
+                        new File([modelJson], 'model.json', { type: 'application/json' }),
+                        new File([modelWeights], 'weights.bin', { type: 'application/octet-stream' })
+                    ]));
+                    appState.lpe.model = loadedModel;
+                    console.log('LPE model loaded from local storage.');
+                }
+            } catch (e) {
+                console.warn('Failed to load LPE model from local storage, starting fresh:', e);
+            }
+
+            appState.lpe.isModelReady = true;
+            console.log('LPE model initialized.');
+        };
+
+        /**
+         * Trains the LPE model with collected interaction-state pairs.
+         * This simulates continuous online learning.
+         * @param {Array<object>} data - Array of {input: features, output: target_preferences}
+         */
+        const trainLPEModel = async (data) => {
+            if (!appState.lpe.isModelReady || data.length === 0) return;
+
+            // Prepare tensors from the training data
+            const inputs = tf.tensor2d(data.map(d => d.input));
+            const outputs = tf.tensor2d(data.map(d => d.output));
+
+            // Train the model
+            try {
+                await appState.lpe.model.fit(inputs, outputs, {
+                    epochs: 5, // Small number of epochs for incremental training
+                    shuffle: true,
+                    verbose: 0, // Suppress logging during training
+                    callbacks: {
+                        onTrainEnd: () => {
+                            console.log(`LPE model trained with ${data.length} samples.`);
+                            // Save model weights after training
+                            saveLPEModel();
+                        }
+                    }
+                });
+            } catch (e) {
+                console.error('Error during LPE model training:', e);
+            } finally {
+                inputs.dispose(); // Clean up tensors
+                outputs.dispose();
+            }
+        };
+
+        /**
+         * Saves the TensorFlow.js model weights to local storage.
+         */
+        const saveLPEModel = debounce(async () => {
+            if (!appState.lpe.model) return;
+            try {
+                const saveResult = await appState.lpe.model.save(tf.io.with  // Use with to save to browser files
+                    (async () => {
+                        return {
+                            async save(modelArtifacts) {
+                                localStorage.setItem(`auraflow_lpe_model_json_${getAnonymousUserId()}`, JSON.stringify(modelArtifacts.modelTopology));
+                                localStorage.setItem(`auraflow_lpe_model_weights_${getAnonymousUserId()}`, modelArtifacts.weightData);
+                                return {
+                                    modelArtifactsInfo: {
+                                        dateSaved: new Date(),
+                                        modelTopologyType: modelArtifacts.modelTopologyType,
+                                        modelTopologyBytes: modelArtifacts.modelTopologyBytes,
+                                        weightSpecsBytes: modelArtifacts.weightSpecsBytes,
+                                        weightDataBytes: modelArtifacts.weightDataBytes,
+                                    },
+                                };
+                            },
+                        };
+                    })()
+                );
+                console.log('LPE model weights saved to local storage:', saveResult);
+            } catch (e) {
+                console.error('Failed to save LPE model weights:', e);
+            }
+        }, 5000); // Debounce saving to prevent excessive operations
+
+        /**
+         * Makes a prediction based on current user interaction features.
+         * @param {object} features - Normalized interaction features.
+         * @returns {object} Predicted preferences (mood, complexity, colorVibrancy)
+         */
+        const predictLPE = (features) => {
+            if (!appState.lpe.isModelReady || !appState.lpe.model) {
+                // Return a neutral prediction if model not ready
+                return { mood: 0.5, complexity: 0.5, colorVibrancy: 0.5 };
+            }
+
+            // Convert features to a tensor
+            const inputTensor = tf.tensor2d([[
+                features.mouseSpeed,
+                features.clickRate,
+                features.idleRatio,
+                features.keyboardActivity
+            ]]);
+
+            // Make prediction
+            const prediction = appState.lpe.model.predict(inputTensor);
+            const predictedValues = prediction.dataSync(); // Get values from tensor
+
+            inputTensor.dispose(); // Clean up tensor
+            prediction.dispose();
+
+            // Map predicted values back to preference object
+            return {
+                mood: clamp(predictedValues[0], 0, 1),
+                complexity: clamp(predictedValues[1], 0, 1),
+                colorVibrancy: clamp(predictedValues[2], 0, 1),
+            };
+        };
+
+        // --- Adaptive Evolution Engine (AEE) ---
+
+        /**
+         * Updates the target parameters for GVE and GASE based on LPE predictions.
+         * This module maps abstract preferences to concrete visual/audio parameters.
+         * @param {object} predictedPreferences - Output from LPE
+         */
+        const updateAdaptiveEvolutionEngineTargets = (predictedPreferences) => {
+            // Map LPE preferences to GVE targets
+            appState.targetVisual.complexity = predictedPreferences.complexity;
+            appState.targetVisual.colorHue = predictedPreferences.colorVibrancy; // Use vibrancy for hue shift
+            appState.targetVisual.saturation = lerp(0.5, 1.0, predictedPreferences.colorVibrancy);
+            appState.targetVisual.luminosity = lerp(0.3, 0.7, predictedPreferences.mood); // Brighter for energetic, darker for calm
+            appState.targetVisual.flowSpeed = lerp(0.3, 0.7, predictedPreferences.mood);
+
+            // Map LPE preferences to GASE targets
+            appState.targetAudio.density = predictedPreferences.complexity; // More complex visuals -> more dense audio
+            appState.targetAudio.timbre = predictedPreferences.colorVibrancy; // More vibrant visuals -> brighter timbre
+            appState.targetAudio.reverb = lerp(0.2, 0.6, 1 - predictedPreferences.mood); // More reverb for calm, less for energetic
+            appState.targetAudio.pitchRange = predictedPreferences.mood; // Wider range for energetic, narrower for calm
+
+            console.log('AEE Targets updated:', appState.targetVisual, appState.targetAudio);
+        };
+
+        /**
+         * Smoothly interpolates current parameters towards their targets.
+         * This runs in the main animation loop.
+         */
+        const interpolateParameters = () => {
+            for (const key in appState.visual) {
+                if (appState.targetVisual[key] !== undefined) {
+                    appState.visual[key] = lerp(appState.visual[key], appState.targetVisual[key], config.PARAMETER_EASING_SPEED);
+                }
+            }
+            for (const key in appState.audio) {
+                if (appState.targetAudio[key] !== undefined) {
+                    appState.audio[key] = lerp(appState.audio[key], appState.targetAudio[key], config.PARAMETER_EASING_SPEED);
+                }
+            }
+        };
+
+
+        // --- Generative Visuals Engine (GVE) ---
+
+        /**
+         * Initializes the Three.js scene, camera, renderer, and generative particles.
+         */
+        const initGVE = () => {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            appContainer.appendChild(renderer.domElement);
+
+            camera.position.z = 5;
+
+            // Create particle geometry with custom attributes
+            geometry = new THREE.BufferGeometry();
+            const positions = [];
+            const colors = [];
+            const sizes = [];
+            const velocities = [];
+
+            for (let i = 0; i < config.PARTICLE_COUNT_MAX; i++) {
+                // Initial positions (randomly within a sphere)
+                positions.push(Math.random() * 10 - 5);
+                positions.push(Math.random() * 10 - 5);
+                positions.push(Math.random() * 10 - 5);
+
+                // Initial colors (will be updated dynamically)
+                colors.push(1.0, 1.0, 1.0);
+
+                // Initial sizes
+                sizes.push(Math.random() * 0.5 + 0.1);
+
+                // Initial velocities
+                velocities.push(Math.random() * 2 - 1);
+                velocities.push(Math.random() * 2 - 1);
+                velocities.push(Math.random() * 2 - 1);
+            }
+
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+            geometry.setAttribute('velocity', new THREE.Float32BufferAttribute(velocities, 3));
+
+            // Custom shader material for particles
+            particleMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    color: { value: new THREE.Color(0xffffff) },
+                    pointSize: { value: 1.0 },
+                    time: { value: 0.0 },
+                    flowSpeed: { value: 0.5 },
+                    visualComplexity: { value: 0.5 },
+                    saturation: { value: 0.7 },
+                    luminosity: { value: 0.5 },
+                },
+                vertexShader: `
+                    attribute float size;
+                    attribute vec3 color;
+                    attribute vec3 velocity;
+                    uniform float pointSize;
+                    uniform float time;
+                    uniform float flowSpeed;
+                    uniform float visualComplexity;
+                    uniform float saturation;
+                    uniform float luminosity;
+                    varying vec3 vColor;
+
+                    // HSL to RGB conversion
+                    vec3 hsl2rgb(vec3 hsl) {
+                        vec3 rgb = clamp(abs(mod(hsl.x * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+                        return hsl.z + hsl.y * (rgb - 0.5) * (1.0 - abs(2.0 * hsl.z - 1.0));
+                    }
+
+                    void main() {
+                        // Dynamic position based on velocity and time
+                        vec3 newPosition = position + velocity * flowSpeed * time * 0.01;
+
+                        // Add some noise/complexity based on visualComplexity
+                        newPosition.x += sin(newPosition.y * 0.5 + time * 0.005 * visualComplexity) * 0.1 * visualComplexity;
+                        newPosition.y += cos(newPosition.x * 0.5 + time * 0.005 * visualComplexity) * 0.1 * visualComplexity;
+                        newPosition.z += sin(newPosition.z * 0.5 + time * 0.005 * visualComplexity) * 0.1 * visualComplexity;
+
+                        // Wrap particles around if they go too far
+                        newPosition = mod(newPosition + 5.0, 10.0) - 5.0;
+
+                        vec4 mvPosition = modelViewMatrix * vec4(newPosition, 1.0);
+
+                        // Apply HSL conversion for dynamic colors
+                        vec3 hslColor = vec3(color.x, saturation, luminosity);
+                        vColor = hsl2rgb(hslColor);
+
+                        gl_PointSize = size * (pointSize + visualComplexity * 2.0) * (1.0 / -mvPosition.z);
+                        gl_Position = projectionMatrix * mvPosition;
+                    }
+                `,
+                fragmentShader: `
+                    varying vec3 vColor;
+                    void main() {
+                        float r = distance(gl_PointCoord, vec2(0.5, 0.5));
+                        if (r > 0.5) discard; // Make points round
+                        gl_FragColor = vec4(vColor, 1.0 - r * 2.0); // Fade out towards edges
+                    }
+                `,
+                blending: THREE.AdditiveBlending, // For glowing effect
+                depthTest: false,
+                transparent: true
+            });
+
+            particles = new THREE.Points(geometry, particleMaterial);
+            scene.add(particles);
+
+            // Handle window resizing
+            window.addEventListener('resize', onWindowResize);
+        };
+
+        /**
+         * Resizes the renderer and camera on window resize.
+         */
+        const onWindowResize = () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        };
+
+        /**
+         * Updates the visual parameters in the GVE's shader uniforms.
+         */
+        const updateGVEParameters = () => {
+            const { complexity, colorHue, saturation, luminosity, flowSpeed } = appState.visual;
+
+            // Update shader uniforms
+            particleMaterial.uniforms.visualComplexity.value = complexity;
+            particleMaterial.uniforms.flowSpeed.value = flowSpeed;
+            particleMaterial.uniforms.saturation.value = saturation;
+            particleMaterial.uniforms.luminosity.value = luminosity;
+
+            // Update particle colors based on hue
+            const colors = geometry.attributes.color.array;
+            for (let i = 0; i < colors.length; i += 3) {
+                colors[i] = colorHue; // We pass hue as the red component to shader
+            }
+            geometry.attributes.color.needsUpdate = true;
+
+            // Adjust particle count based on complexity (simulated by updating draw range)
+            const actualParticleCount = Math.floor(lerp(config.PARTICLE_COUNT_MIN, config.PARTICLE_COUNT_MAX, complexity));
+            geometry.setDrawRange(0, actualParticleCount);
+        };
+
+        /**
+         * The main animation loop for GVE.
+         */
+        const animateGVE = () => {
+            const now = performance.now();
+            const deltaTime = (now - lastFrameTime) / 1000; // in seconds
+            lastFrameTime = now;
+
+            // Update FPS
+            frameCount++;
+            if (now - (lastFrameTime - deltaTime * 1000) >= 1000) { // Every second
+                fps = frameCount;
+                frameCount = 0;
+            }
+
+            // Update shader time uniform
+            particleMaterial.uniforms.time.value += deltaTime;
+
+            // Interpolate parameters smoothly
+            interpolateParameters();
+
+            // Apply interpolated parameters to GVE
+            updateGVEParameters();
+
+            // Render the scene
+            renderer.render(scene, camera);
+
+            // Request next frame
+            animationFrameId = requestAnimationFrame(animateGVE);
+
+            // Update debug info
+            updateDebugOverlay();
+        };
+
+
+        // --- Generative Ambient Soundscape Engine (GASE) ---
+
+        /**
+         * Initializes the Tone.js audio context and sets up instruments and effects.
+         */
+        const initGASE = () => {
+            // Main synths
+            mainSynth = new Tone.PolySynth(Tone.Synth, {
+                oscillator: { type: "sine" },
+                envelope: { attack: 2, decay: 1, sustain: 0.5, release: 2 },
+            }).toDestination();
+
+            padSynth = new Tone.PolySynth(Tone.AMSynth, {
+                oscillator: { type: "triangle" },
+                envelope: { attack: 4, decay: 2, sustain: 0.8, release: 5 },
+            }).toDestination();
+
+            bassSynth = new Tone.PolySynth(Tone.Synth, {
+                oscillator: { type: "square" },
+                envelope: { attack: 0.1, decay: 0.5, sustain: 0.3, release: 1 },
+            }).toDestination();
+
+            // Effects
+            reverb = new Tone.Reverb({ decay: 5, preDelay: 0.1 }).toDestination();
+            delay = new Tone.FeedbackDelay({ delayTime: "8n", feedback: 0.5 }).toDestination();
+
+            mainSynth.connect(reverb);
+            padSynth.connect(delay);
+            bassSynth.connect(reverb); // Bass also gets some reverb
+
+            // Simple melodic loop (C minor pentatonic)
+            const melodyNotes = ["C3", "Eb3", "F3", "G3", "Bb3", "C4", "Bb3", "G3", "F3", "Eb3"];
+            melodyLoop = new Tone.Loop(time => {
+                if (activeVoices.length > 0) {
+                    const note = melodyNotes[Math.floor(Math.random() * melodyNotes.length)];
+                    mainSynth.triggerAttackRelease(note, "2n", time);
+                }
+            }, "4n").start(0);
+            melodyLoop.humanize = true; // Add slight randomness
+
+            // Simple bass loop
+            const bassNotes = ["C2", "G1", "F1", "C2"];
+            bassLoop = new Tone.Loop(time => {
+                if (activeVoices.length > 0) {
+                    const note = bassNotes[Math.floor(Math.random() * bassNotes.length)];
+                    bassSynth.triggerAttackRelease(note, "1n", time);
+                }
+            }, "1n").start(0);
+            bassLoop.humanize = true;
+
+            // Initially set audio to neutral state
+            updateGASEParameters();
+        };
+
+        /**
+         * Starts the Web Audio API context. Required by most browsers on user gesture.
+         */
+        const startAudioContext = async () => {
+            if (Tone.context.state !== 'running') {
+                await Tone.start();
+                console.log('Audio context started.');
+            }
+            if (!appState.isAudioPlaying) {
+                Tone.Transport.start();
+                appState.isAudioPlaying = true;
+                toggleSoundBtn.textContent = 'Mute Sound';
+            }
+        };
+
+        /**
+         * Toggles audio playback (mute/unmute).
+         */
+        const toggleAudio = () => {
+            if (appState.isAudioPlaying) {
+                Tone.Transport.stop();
+                appState.isAudioPlaying = false;
+                toggleSoundBtn.textContent = 'Unmute Sound';
+            } else {
+                startAudioContext();
+            }
+        };
+
+        /**
+         * Updates the GASE parameters based on `appState.audio`.
+         */
+        const updateGASEParameters = () => {
+            const { density, timbre, reverb: reverbAmount, pitchRange } = appState.audio;
+
+            // Density: controls active voices/notes
+            const targetVoices = Math.floor(mapRange(density, 0, 1, config.AUDIO_DENSITY_MIN_VOICES, config.AUDIO_DENSITY_MAX_VOICES));
+            if (targetVoices !== activeVoices.length) {
+                activeVoices = Array(targetVoices).fill(0); // Simple array to represent active voices
+            }
+
+            // Timbre: modulate synth parameters
+            mainSynth.set({
+                oscillator: { type: timbre < 0.5 ? "sine" : "triangle" },
+                filter: { frequency: mapRange(timbre, 0, 1, 200, 2000) }
+            });
+            padSynth.set({
+                oscillator: { type: timbre < 0.7 ? "amtriangle" : "amsquare" },
+                harmonicity: mapRange(timbre, 0, 1, 0.5, 2)
+            });
+            bassSynth.set({
+                oscillator: { type: timbre < 0.3 ? "sine" : "square" }
+            });
+
+            // Reverb amount
+            reverb.wet.value = reverbAmount;
+
+            // Pitch range (affects melody loop speed/complexity implicitly)
+            // For a direct pitch range effect, we'd need to modify the notes array itself.
+            // For now, let's just make the loop faster/slower based on pitchRange
+            melodyLoop.interval = mapRange(pitchRange, 0, 1, "4n", "8n");
+            bassLoop.interval = mapRange(pitchRange, 0, 1, "1n", "2n");
+
+            // Overall volume adjustments based on density
+            const overallVolume = mapRange(density, 0, 1, -20, -5); // Louder for more density
+            Tone.Destination.volume.value = overallVolume;
+        };
+
+
+        // --- Web Worker Setup ---
+
+        /**
+         * Creates and initializes the Web Worker.
+         * The worker will handle UIM feature extraction and LPE inference/training
+         * to avoid blocking the main thread.
+         */
+        const setupWorker = () => {
+            // Inline worker script as a Blob URL
+            const workerCode = `
+                let lastFeatures = { mouseSpeed: 0, clickRate: 0, idleRatio: 0, keyboardActivity: 0 };
+                let lastInteractionTime = Date.now(); // For idle time tracking in worker
+                let lastClickCount = 0;
+                let lastMousePositions = []; // To manage the history for feature extraction
+
+                // Configuration passed from main thread
+                let config = {};
+
+                // TensorFlow.js will be loaded in the worker context
+                self.importScripts('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.13.0/dist/tf.min.js');
+
+                let model = null;
+                let isModelReady = false;
+                let trainingData = []; // Worker's copy of training data
+
+                // Utility functions (copied from main thread for worker's use)
+                const clamp = (value, min, max) => Math.max(min, Math.min(value, max));
+                const lerp = (a, b, alpha) => a + (b - a) * alpha;
+                const mapRange = (value, inMin, inMax, outMin, outMax) => {
+                    return ((value - inMin) * (outMax - outMin)) / (inMax - inMin) + outMin;
+                };
+
+                // LPE model functions (simplified for worker)
+                const initModel = async () => {
+                    model = tf.sequential({
+                        layers: [
+                            tf.layers.dense({ units: 8, activation: 'relu', inputShape: [4] }),
+                            tf.layers.dense({ units: 8, activation: 'relu' }),
+                            tf.layers.dense({ units: 3, activation: 'sigmoid' })
+                        ]
+                    });
+                    model.compile({
+                        optimizer: tf.train.adam(config.LPE_LEARNING_RATE),
+                        loss: 'meanSquaredError'
+                    });
+                    isModelReady = true;
+                    // Post message back to main thread that model is ready
+                    self.postMessage({ type: 'LPE_READY' });
+                };
+
+                const trainModel = async (data) => {
+                    if (!isModelReady || data.length === 0) return;
+                    const inputs = tf.tensor2d(data.map(d => d.input));
+                    const outputs = tf.tensor2d(data.map(d => d.output));
+                    try {
+                        await model.fit(inputs, outputs, { epochs: 5, shuffle: true, verbose: 0 });
+                        // Post message back to main thread to save model (main thread manages persistence)
+                        self.postMessage({ type: 'SAVE_LPE_MODEL', model: await model.save(tf.io.with'browser') });
+                    } catch (e) {
+                        console.error('Worker: Error during LPE model training:', e);
+                    } finally {
+                        inputs.dispose();
+                        outputs.dispose();
+                    }
+                };
+
+                const predict = (features) => {
+                    if (!isModelReady || !model) {
+                        return { mood: 0.5, complexity: 0.5, colorVibrancy: 0.5 };
+                    }
+                    const inputTensor = tf.tensor2d([[
+                        features.mouseSpeed, features.clickRate, features.idleRatio, features.keyboardActivity
+                    ]]);
+                    const prediction = model.predict(inputTensor);
+                    const predictedValues = prediction.dataSync();
+                    inputTensor.dispose();
+                    prediction.dispose();
+                    return {
+                        mood: clamp(predictedValues[0], 0, 1),
+                        complexity: clamp(predictedValues[1], 0, 1),
+                        colorVibrancy: clamp(predictedValues[2], 0, 1),
+                    };
+                };
+
+                // UIM Feature Extraction (similar to main thread's, but isolated)
+                const extractFeaturesWorker = (rawInteractions) => {
+                    const now = Date.now();
+                    // Update worker's internal state based on latest raw interactions
+                    lastMousePositions = rawInteractions.mousePositions;
+                    lastClickCount = rawInteractions.clickCount;
+                    lastInteractionTime = rawInteractions.lastActivityTime;
+
+                    const mousePositionsInWindow = lastMousePositions.filter(p => now - p.time <= config.INTERACTION_FEATURE_WINDOW_MS);
+
+                    let mouseSpeed = 0;
+                    if (mousePositionsInWindow.length > 1) {
+                        let totalDistance = 0;
+                        for (let i = 1; i < mousePositionsInWindow.length; i++) {
+                            const p1 = mousePositionsInWindow[i - 1];
+                            const p2 = mousePositionsInWindow[i];
+                            totalDistance += Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+                        }
+                        const timeDiff = mousePositionsInWindow[mousePositionsInWindow.length - 1].time - mousePositionsInWindow[0].time;
+                        if (timeDiff > 0) {
+                            mouseSpeed = totalDistance / timeDiff;
+                        }
+                    }
+
+                    const clickRate = lastClickCount / (config.INTERACTION_FEATURE_WINDOW_MS / 1000);
+                    const idleTime = Math.max(0, now - lastInteractionTime);
+                    const idleRatio = Math.min(1, idleTime / config.IDLE_THRESHOLD_MS);
+
+                    const normalizedMouseSpeed = clamp(mouseSpeed / 5, 0, 1);
+                    const normalizedClickRate = clamp(clickRate / 5, 0, 1);
+                    const normalizedKeyboardActivity = rawInteractions.keyboardActive ? 1 : 0;
+                    const normalizedIdleRatio = clamp(idleRatio, 0, 1);
+
+                    return {
+                        mouseSpeed: normalizedMouseSpeed,
+                        clickRate: normalizedClickRate,
+                        idleRatio: normalizedIdleRatio,
+                        keyboardActivity: normalizedKeyboardActivity,
+                    };
+                };
+
+
+                // Worker message handler
+                self.onmessage = async (event) => {
+                    const { type, payload } = event.data;
+
+                    switch (type) {
+                        case 'INIT_WORKER':
+                            config = payload.config;
+                            await initModel(); // Initialize TF.js model
+                            if (payload.initialTrainingData && payload.initialTrainingData.length > 0) {
+                                trainingData = payload.initialTrainingData;
+                                await trainModel(trainingData);
+                            }
+                            break;
+                        case 'PROCESS_INTERACTIONS':
+                            const features = extractFeaturesWorker(payload.rawInteractions);
+                            const predictedPreferences = predict(features);
+
+                            // Add to training data for the next training cycle
+                            // Here, we assume the *current* appState.visual/audio
+                            // represents the "target" that the user is interacting with.
+                            // In a more advanced system, we'd infer the *desired* state.
+                            trainingData.push({
+                                input: [features.mouseSpeed, features.clickRate, features.idleRatio, features.keyboardActivity],
+                                output: [
+                                    payload.currentAppState.visual.complexity, // Simplified: map directly to visual complexity
+                                    payload.currentAppState.audio.density,    // Simplified: map directly to audio density
+                                    payload.currentAppState.visual.colorHue,  // Simplified: map directly to color hue
+                                ]
+                            });
+                            if (trainingData.length > config.MAX_TRAINING_DATA) {
+                                trainingData.shift(); // Remove oldest data point
+                            }
+
+                            // Periodically train the model
+                            if (Math.random() < 0.1) { // Train ~10% of the time, or based on a timer
+                                await trainModel(trainingData);
+                            }
+
+                            self.postMessage({
+                                type: 'PREDICTION_RESULT',
+                                features: features,
+                                predictedPreferences: predictedPreferences,
+                            });
+                            break;
+                        case 'RESET_LPE':
+                            trainingData = [];
+                            await initModel(); // Re-initialize model
+                            break;
+                        // Add other message types if needed
+                    }
+                };
+            `;
+            const blob = new Blob([workerCode], { type: 'application/javascript' });
+            worker = new Worker(URL.createObjectURL(blob));
+
+            worker.onmessage = (event) => {
+                const { type, features, predictedPreferences } = event.data;
+                if (type === 'PREDICTION_RESULT') {
+                    // Update main thread's debug info with latest features
+                    Object.assign(appState.interactions, features);
+                    // Update LPE's predicted preference
+                    appState.lpe.predictedPreference = predictedPreferences;
+                    // Trigger AEE to update targets
+                    updateAdaptiveEvolutionEngineTargets(predictedPreferences);
+                } else if (type === 'LPE_READY') {
+                    appState.lpe.isModelReady = true;
+                    console.log('Main thread: LPE worker model is ready.');
+                    // Load and train with persisted data after worker is ready
+                    loadState();
+                } else if (type === 'SAVE_LPE_MODEL') {
+                    // This message is for demonstration. In a real scenario,
+                    // the worker would save its own state or pass the model
+                    // artifacts to the main thread for saving.
+                    // For now, we'll just log it.
+                    console.log('Worker requested LPE model save (handled by main thread).');
+                }
+            };
+
+            worker.onerror = (error) => {
+                console.error('Web Worker error:', error);
+            };
+
+            // Initialize worker with config and initial training data
+            worker.postMessage({
+                type: 'INIT_WORKER',
+                payload: {
+                    config: config,
+                    initialTrainingData: appState.lpe.trainingData, // Pass existing data
+                }
+            });
+        };
+
+        // --- UI Control Functions ---
+
+        /**
+         * Toggles the visibility of the control overlay.
+         */
+        const toggleControlsOverlay = () => {
+            controlsOverlay.classList.toggle('hidden');
+            if (!controlsOverlay.classList.contains('hidden')) {
+                controlsOverlay.querySelector('button').focus(); // Focus first button for accessibility
+            }
+        };
+
+        /**
+         * Toggles the visibility of the debug overlay.
+         */
+        const toggleDebugOverlay = () => {
+            debugOverlay.classList.toggle('hidden');
+        };
+
+        /**
+         * Updates the debug overlay with current system metrics and states.
+         */
+        const updateDebugOverlay = () => {
+            if (debugOverlay.classList.contains('hidden')) return;
+
+            debugFps.textContent = fps.toFixed(0);
+            debugMouseSpeed.textContent = appState.interactions.mouseSpeed.toFixed(2);
+            debugClickRate.textContent = appState.interactions.clickRate.toFixed(2);
+            debugIdleTime.textContent = (appState.interactions.idleTime / 1000).toFixed(1) + 's';
+            debugPredictedState.textContent = `Mood: ${appState.lpe.predictedPreference.mood.toFixed(2)}, Complexity: ${appState.lpe.predictedPreference.complexity.toFixed(2)}, Color: ${appState.lpe.predictedPreference.colorVibrancy.toFixed(2)}`;
+            debugVisComplexity.textContent = appState.visual.complexity.toFixed(2);
+            debugAudDensity.textContent = appState.audio.density.toFixed(2);
+            debugColorHue.textContent = appState.visual.colorHue.toFixed(2);
+        };
+
+        // --- Main Application Initialization ---
+
+        /**
+         * Initializes all core modules and starts the application.
+         */
+        const initAuraFlow = () => {
+            // Set initial target parameters to current state
+            Object.assign(appState.targetVisual, appState.visual);
+            Object.assign(appState.targetAudio, appState.audio);
+
+            initGVE(); // Initialize Generative Visuals Engine
+            initGASE(); // Initialize Generative Ambient Soundscape Engine
+            setupWorker(); // Setup Web Worker for UIM/LPE
+
+            // Attach event listeners for UIM
+            window.addEventListener('mousemove', handleMouseMove);
+            window.addEventListener('mousedown', handleMouseDown);
+            window.addEventListener('keydown', handleKeyDown);
+            window.addEventListener('keyup', handleKeyUp);
+
+            // Attach event listeners for UI controls
+            toggleSoundBtn.addEventListener('click', toggleAudio);
+            resetPatternsBtn.addEventListener('click', resetLearnedPatterns);
+            closeControlsBtn.addEventListener('click', toggleControlsOverlay);
+
+            // Start the main animation loop
+            animateGVE();
+
+            // Periodically send interaction data to worker for processing and prediction
+            setInterval(() => {
+                if (worker) {
+                    worker.postMessage({
+                        type: 'PROCESS_INTERACTIONS',
+                        payload: {
+                            rawInteractions: {
+                                mousePositions: [...appState.interactions.mousePositions],
+                                clickCount: appState.interactions.clickCount,
+                                lastActivityTime: appState.interactions.lastActivityTime,
+                                keyboardActive: appState.interactions.keyboardActive,
+                            },
+                            currentAppState: {
+                                visual: { ...appState.visual },
+                                audio: { ...appState.audio },
+                            },
+                        }
+                    });
+                }
+                // Reset click count for the next window
+                appState.interactions.clickCount = 0;
+            }, config.INTERACTION_FEATURE_WINDOW_MS);
+
+            console.log('AuraFlow: Predictive Scapes initialized.');
+        };
+
+        // Start the application when all CDNs are loaded and DOM is ready
+        // Using a simple check for global objects as CDNs are async.
+        // In a production build, this would be handled by a bundler.
+        const checkDependencies = setInterval(() => {
+            if (window.THREE && window.Tone && window.tf) {
+                clearInterval(checkDependencies);
+                initAuraFlow();
+            }
+        }, 100);
+    </script>
+
+    <div style="position:fixed;bottom:10px;right:10px;background:rgba(0,0,0,0.7);color:white;padding:5px 10px;border-radius:5px;font-family:sans-serif;font-size:12px">
+        Created by Dakota Rain Lock, powered by Holy Grail. A Dakota Rain Lock Invention.
+    </div>
+    
+</body>
+</html>
